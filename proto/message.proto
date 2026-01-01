@@ -1,0 +1,20 @@
+syntax = "proto3";
+package message;
+
+service MessageService {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+}
+
+message LClock {
+    uint32 sender = 1;
+    uint64 timestamp = 2;
+}
+
+message SendMessageRequest {
+    LClock clock = 1;
+    string content = 2;
+}
+
+message SendMessageResponse {
+    bool success = 1;
+}
