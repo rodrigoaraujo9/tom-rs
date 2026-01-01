@@ -60,22 +60,24 @@ impl MessageService {
 #[tonic::async_trait]
 impl MessageServiceTrait for MessageService {
     async fn send_message(&self, request: Request<SendMessageRequest>) -> Result<Response<SendMessageResponse>, Status> {
-        let notifier = self.state.notifier.clone();
         let msg = request.into_inner();
-        if let Some(clock) = &msg.clock {
-            {
-                let mut t = self.state.tick.write().await;
-                *t = (*t).max(clock.timestamp) + 1;
-            }
+        let clock = msg.clock.as_ref().ok_or_else(|| Status::invalid_argument("missing clock"))?;
 
-            {
-                let mut mss = self.state.messages.write().await;
-                mss.push_back(msg);
-                mss.make_contiguous().sort_by(|a,b| (a.clock.as_ref().unwrap().timestamp, a.clock.as_ref().unwrap().sender)
-                    .cmp(&(b.clock.as_ref().unwrap().timestamp, b.clock.as_ref().unwrap().sender)));
-            }
-            notifier.notify_waiters();
+        {
+            let mut t = self.state.tick.write().await;
+            *t = (*t).max(clock.timestamp) + 1;
         }
+
+        {
+            let mut mss = self.state.messages.write().await;
+            mss.push_back(msg);
+            mss.make_contiguous().sort_by_key(|m| {
+                let c = m.clock.as_ref().unwrap();
+                (c.timestamp, c.sender)
+            });
+        }
+
+        self.state.notifier.notify_waiters();
         Ok(Response::new(SendMessageResponse { success: true }))
     }
 }
@@ -87,37 +89,25 @@ async fn process_messages(state: Arc<State>) -> Result<(), Box<dyn Error>> {
         loop {
             let can_deliver = {
                 let mss = state.messages.read().await;
-
                 if mss.is_empty() {
                     break;
                 }
 
-                let front_msg = mss.front().unwrap();
-                let front_clock = front_msg.clock.as_ref().unwrap();
-
+                let front_clock = &mss.front().unwrap().clock.as_ref().unwrap();
                 let mut hs: HashMap<u32, u64> = HashMap::new();
 
                 for msg in mss.iter() {
-                    let clock = msg.clock.as_ref().unwrap();
-                    hs.entry(clock.sender)
-                        .and_modify(|e| *e = (*e).max(clock.timestamp))
-                        .or_insert(clock.timestamp);
+                    let c = msg.clock.as_ref().unwrap();
+                    hs.entry(c.sender)
+                        .and_modify(|e| *e = (*e).max(c.timestamp))
+                        .or_insert(c.timestamp);
                 }
 
-                let mut ok = true;
-                for peer_id in 0..=state.n_peers {
-                    if let Some(&max_ts) = hs.get(&peer_id) {
-                        if max_ts <= front_clock.timestamp && peer_id != front_clock.sender {
-                            ok = false;
-                            break;
-                        }
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                ok
+                (0..=state.n_peers).all(|peer_id| {
+                    hs.get(&peer_id)
+                        .map(|&ts| ts > front_clock.timestamp || peer_id == front_clock.sender)
+                        .unwrap_or(false)
+                })
             };
 
             if !can_deliver {
@@ -125,8 +115,8 @@ async fn process_messages(state: Arc<State>) -> Result<(), Box<dyn Error>> {
             }
 
             if let Some(msg) = state.messages.write().await.pop_front() {
-                let clock = msg.clock.unwrap();
-                cprintln!("<green>*{}:{}*</green> {}", clock.sender, clock.timestamp, msg.content);
+                let c = msg.clock.unwrap();
+                cprintln!("<green>*{}:{}*</green> {}", c.sender, c.timestamp, msg.content);
             }
         }
     }
@@ -144,12 +134,10 @@ async fn broadcast_random_word(state: Arc<State>) -> Result<(), Box<dyn Error>> 
         let msg = {
             let mut t = state.tick.write().await;
             *t += 1;
-            let timestamp = *t;
-
             SendMessageRequest {
                 clock: Some(LClock {
-                        sender: state.index,
-                        timestamp,
+                    sender: state.index,
+                    timestamp: *t,
                 }),
                 content: word,
             }
@@ -158,17 +146,19 @@ async fn broadcast_random_word(state: Arc<State>) -> Result<(), Box<dyn Error>> 
         {
             let mut mss = state.messages.write().await;
             mss.push_back(msg.clone());
-            mss.make_contiguous().sort_by(|a,b| (a.clock.as_ref().unwrap().timestamp, a.clock.as_ref().unwrap().sender)
-                .cmp(&(b.clock.as_ref().unwrap().timestamp, b.clock.as_ref().unwrap().sender)));
+            mss.make_contiguous().sort_by_key(|m| {
+                let c = m.clock.as_ref().unwrap();
+                (c.timestamp, c.sender)
+            });
         }
 
         {
             let peers = state.peers.read().await;
-            for (_addr, client) in peers.iter() {
+            for (_, client) in peers.iter() {
                 let msg = msg.clone();
-                let mut client = client.clone();
+                let mut c = client.clone();
                 tokio::spawn(async move {
-                    let _ = client.send_message(msg).await;
+                    let _ = c.send_message(msg).await;
                 });
             }
         }
@@ -205,7 +195,7 @@ async fn connect_to_peers(addrs: &[(u32, String)], idx: u32) -> HashMap<u32, Mes
                     break;
                 }
                 Err(e) => {
-                    cprintln!("<red>*err*</red>  waiting to connect to peer {}: {}", i, e);
+                    cprintln!("<red>*err*</red> waiting to connect to peer {}: {}", i, e);
                     sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -217,33 +207,44 @@ async fn connect_to_peers(addrs: &[(u32, String)], idx: u32) -> HashMap<u32, Mes
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args().collect();
+
     if args.len() < 3 {
         exit(1);
     }
+
     let idx: u32 = args[1].parse().expect("invalid index");
+
     let addrs: Vec<(u32, String)> = args[2..]
         .iter()
         .enumerate()
         .map(|(i, addr)| (i as u32, addr.clone()))
         .collect();
+
     let n = addrs.len() as u32 - 1;
     let my_addr = addrs[idx as usize].1.clone();
+
     let mut seed = [0u8; 32];
     seed[0..4].copy_from_slice(&idx.to_le_bytes());
+
     let addr: SocketAddr = my_addr.parse()?;
+
     let service = MessageService::new(idx, HashMap::new(), n, "data/data.csv", seed).await?;
+
     let state = service.state.clone();
     let s = state.clone();
+
     tokio::spawn(async move {
         if let Err(e) = Server::builder()
             .add_service(MessageServiceServer::new(MessageService { state: s }))
             .serve(addr)
             .await
         {
-            cprintln!("<red>*err*</red>  server error: {}", e);
+            cprintln!("<red>*err*</red> server error: {}", e);
         }
     });
+
     sleep(Duration::from_secs(2)).await;
+
     cprintln!("<blue>*conn*</blue> connecting to other peers");
     let peers = connect_to_peers(&addrs, idx).await;
     cprintln!("<blue>*conn*</blue> all peers connected!");
@@ -251,18 +252,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut p = state.peers.write().await;
         *p = peers;
     }
+
     let s = state.clone();
     tokio::spawn(async move {
         if let Err(e) = process_messages(s).await {
-            cprintln!("<red>*err*</red>  message processor error: {}", e);
+            cprintln!("<red>*err*</red> message processor error: {}", e);
         }
     });
+
     let s = state.clone();
     tokio::spawn(async move {
         if let Err(e) = broadcast_random_word(s).await {
-            cprintln!("<red>*err*</red>  broadcaster error: {}", e);
+            cprintln!("<red>*err*</red> broadcaster error: {}", e);
         }
     });
+
     loop {
         sleep(Duration::from_secs(3600)).await;
     }
