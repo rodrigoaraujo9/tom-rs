@@ -241,6 +241,9 @@ async fn connect_to_peers(addrs: &[(u32, String)], idx: u32) -> HashMap<u32, Mes
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args().collect();
+
+    let args: Vec<String> = args.into_iter().filter(|arg| arg != "--release").collect();
+
     if args.len() < 3 {
         exit(1);
     }

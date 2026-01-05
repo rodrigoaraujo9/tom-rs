@@ -10,6 +10,9 @@ use message::{SendMessageRequest, LClock};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
+
+    let args: Vec<String> = args.into_iter().filter(|arg| arg != "--release").collect();
+
     let address = if args.len() > 1 {
         if args[1].starts_with("http://") {
             args[1].clone()
@@ -19,7 +22,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         "http://127.0.0.1:50051".to_string()
     };
-
     let mut client = MessageServiceClient::connect(address).await?;
     cprintln!("<blue>*attack*</blue> sending normal message with ts=10");
     let msg = SendMessageRequest {
