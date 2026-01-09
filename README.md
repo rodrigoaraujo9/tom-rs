@@ -1,6 +1,22 @@
-# Totally Ordered Multicast
+# Totally Ordered Multicast with Lamport Clocks
 
-Distributed messaging system with Lamport clocks and total ordering guarantees.
+A simple distributed system I built for my distributed systems class that implements totally ordered multicast using Lamport logical clocks. Communication between nodes is done via gRPC protocol.
+
+## What it does
+
+- Multiple peer nodes communicate via gRPC
+- Each node broadcasts random words from a CSV file at random intervals (Poisson distribution)
+- Messages are ordered using Lamport clocks - ensuring causally consistent delivery
+- Delivery rule: a message is only delivered when we've seen later timestamps from all other peers
+
+## Attack protection
+
+I implemented basic defenses against malicious nodes:
+- Rejects timestamp reuse (can't send same timestamp twice)
+- Rejects backwards timestamps (can't go back in time)
+- Rejects far-future timestamps (drift limit of 100)
+
+The `attack_client.rs` tests these protections.
 
 ## Running
 
