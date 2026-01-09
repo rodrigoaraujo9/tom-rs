@@ -1,6 +1,6 @@
 # Totally Ordered Multicast with Lamport Clocks
 
-A simple distributed system I built for my distributed systems class that implements totally ordered multicast using Lamport logical clocks. Communication between nodes is done via gRPC protocol.
+A distributed system I built for my distributed systems class in Rust that implements totally ordered multicast using Lamport logical clocks. Communication between nodes is done via gRPC using Tonic.
 
 ## What it does
 
